@@ -78,42 +78,48 @@ description: >
 </items>
 ```
 
-### Rule 4: Buttons — two approaches
+### Rule 4: Buttons in autoCommandBar (CRITICAL)
 
-**Approach A: autoCommandBar (recommended for main commands)**
+**Buttons in autoCommandBar use `form:Button` with `commandName` — NOT `commandButton`!**
+
 ```xml
 <autoCommandBar>
   <name>ФормаКоманднаяПанель</name>
   <id>-1</id>
-  <horizontalAlign>Left</horizontalAlign>
-  <autoFill>true</autoFill>
-  <children>
-    <commandButton>
-      <name>СформироватьКнопка</name>
-      <id>1</id>
-      <command>Сформировать</command>  <!-- Must match formCommands name -->
-      <title>Сформировать</title>
-    </commandButton>
-    <commandButton>
-      <name>ЗаполнитьНастройкиКнопка</name>
-      <id>2</id>
-      <command>ЗаполнитьНастройки</command>
-      <title>Заполнить настройки</title>
-    </commandButton>
-  </children>
+  <items xsi:type="form:Button">
+    <name>ФормаСформировать</name>
+    <id>1</id>
+    <visible>true</visible>
+    <enabled>true</enabled>
+    <userVisible><common>true</common></userVisible>
+    <type>UsualButton</type>
+    <commandName>Form.Command.Сформировать</commandName>  <!-- Must match formCommands name -->
+    <buttonImportance>VeryImportant</buttonImportance>
+    <representation>TextAndPicture</representation>
+  </items>
+  <items xsi:type="form:Button">
+    <name>ФормаЗаполнитьНастройки</name>
+    <id>2</id>
+    <visible>true</visible>
+    <enabled>true</enabled>
+    <userVisible><common>true</common></userVisible>
+    <type>UsualButton</type>
+    <commandName>Form.Command.ЗаполнитьНастройки</commandName>
+    <buttonImportance>Normal</buttonImportance>
+    <representation>Text</representation>
+  </items>
 </autoCommandBar>
 ```
 
-**Approach B: Button in items (for additional buttons)**
+**WRONG — `commandButton` does NOT work in EDT format:**
 ```xml
-<items xsi:type="form:Button">
-  <name>СформироватьКнопка</name>
-  <id>3</id>
-  <type>UsualButton</type>
-  <commandName>Form.Command.Сформировать</commandName>
-  <buttonImportance>VeryImportant</buttonImportance>
-  <representation>TextAndPicture</representation>
-</items>
+<autoCommandBar>
+  <children>
+    <commandButton>
+      <command>Сформировать</command>  <!-- DOES NOT RENDER -->
+    </commandButton>
+  </children>
+</autoCommandBar>
 ```
 
 ## 2. dataPath Format (Critical)
