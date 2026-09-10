@@ -78,13 +78,39 @@ description: >
 </items>
 ```
 
-### Rule 4: Button uses commandName
+### Rule 4: Buttons — two approaches
+
+**Approach A: autoCommandBar (recommended for main commands)**
+```xml
+<autoCommandBar>
+  <name>ФормаКоманднаяПанель</name>
+  <id>-1</id>
+  <horizontalAlign>Left</horizontalAlign>
+  <autoFill>true</autoFill>
+  <children>
+    <commandButton>
+      <name>СформироватьКнопка</name>
+      <id>1</id>
+      <command>Сформировать</command>  <!-- Must match formCommands name -->
+      <title>Сформировать</title>
+    </commandButton>
+    <commandButton>
+      <name>ЗаполнитьНастройкиКнопка</name>
+      <id>2</id>
+      <command>ЗаполнитьНастройки</command>
+      <title>Заполнить настройки</title>
+    </commandButton>
+  </children>
+</autoCommandBar>
+```
+
+**Approach B: Button in items (for additional buttons)**
 ```xml
 <items xsi:type="form:Button">
   <name>СформироватьКнопка</name>
   <id>3</id>
   <type>UsualButton</type>
-  <commandName>Form.Command.Сформировать</commandName>  <!-- Must match formCommands name -->
+  <commandName>Form.Command.Сформировать</commandName>
   <buttonImportance>VeryImportant</buttonImportance>
   <representation>TextAndPicture</representation>
 </items>
