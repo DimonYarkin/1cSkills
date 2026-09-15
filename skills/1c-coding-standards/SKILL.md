@@ -763,6 +763,70 @@ Layer 5: Integrations (feature-flagged)
 | 19 | `РасчетыПроведениеДокументов.ВыполнитьКонтрольСуммыОплаты` | 4/10 |
 | 20 | `НаборыСервер.ПроверитьТабличнуюЧасть` | 6/10 |
 
+## 30. Extension `&Вместо` Override: Pitfalls and Rules
+
+### CRITICAL: Downstream Contract Compliance
+
+When writing a `&Вместо` (Override) for any function, you MUST audit every downstream consumer of the return value and include ALL fields they expect.
+
+**Case Study: `Расш1_ДанныеДокументовРегУчет` (РасходнаяНакладная)**
+
+The original `ДанныеДокументовРегУчет` returns a ТаблицаЗначений with these fields consumed by `ПечатьСчетФактура`:
+
+| Field | Consumer | What happens if missing |
+|-------|----------|------------------------|
+| `ЕстьПрослеживаемыеТовары` | `ПечатьСчетФактура.МодульМенеджера(167)` | Runtime error: "Поле объекта не обнаружено" |
+| `ПрослеживаемыйТоварЧисло` (in ТЧ Запасы) | `Итог("ПрослеживаемыйТоварЧисло")` | Runtime error: "Колонка не принадлежит коллекции" |
+| `СведенияПрослеживаемости` (virtual table) | `ДополнитьСведениямиОПрослеживаемости()` | Missing tracking data on print |
+| `ЭтоУПД`, `СтатусУПД` | `ПечатьСчетФактура` template selection | Wrong template picked |
+| `ЕстьКолонкаАкциз` | `ПечатьСчетФактура` | Missing excise data |
+
+### Rule 1: Field Parity Checklist
+
+Before writing ANY `&Вместо` override for a query function:
+
+```
+1. Read the ORIGINAL function in base configuration
+2. List ALL fields in the SELECT
+3. Search for EVERY consumer of the result:
+   - grep for "FunctionName" across all modules
+   - grep for field names in Печать* modules
+4. Your override MUST return the SAME fields
+5. Extra fields you don't need → use ЛОЖЬ/0/НЕОПРЕДЕЛЕНО
+```
+
+### Rule 2: Virtual Tables Are Not Optional
+
+If the original query has virtual tables (ТЧ like `Запасы`, `ДобавленныеНаборы`, `СведенияПрослеживаемости`), your override MUST include them too — even if you fill them with empty data. Downstream code may iterate over them unconditionally.
+
+### Rule 3: Post-Processing Must Match
+
+If the original function has post-processing (e.g., calculating `ЕстьПрослеживаемыеТовары` from `ТаблицаЗапасы.Итог()`), your override must replicate that logic. The field in SELECT is just a placeholder — the REAL value comes from post-processing.
+
+**Correct pattern:**
+```bsl
+// In query: ЛОЖЬ КАК ЕстьПрослеживаемыеТовары  (placeholder)
+// In query ТЧ Запасы: ВЫБОР КОГДА Номенклатура.ПрослеживаемыйТовар ТОГДА 1 ИНАЧЕ 0 КОНЕЦ КАК ПрослеживаемыйТоварЧисло
+// In post-processing:
+ТекущаяСтрока.ЕстьПрослеживаемыеТовары = (ТекущаяСтрока.ТаблицаЗапасы.Итог("ПрослеживаемыйТоварЧисло") > 0);
+```
+
+### Rule 4: UNION Queries Need Column Count Match
+
+When using `ОБЪЕДИНИТЬ ВСЕ`, ALL parts of the UNION must have the SAME number of columns in the SAME order. If you add a field to the first SELECT, you MUST add it to every subsequent SELECT in the UNION.
+
+### Rule 5: Temporary Tables Are Shared
+
+If your query creates a `ПОМЕСТИТЬ ВременнаяТаблица_*`, any subsequent query that reads from it MUST include the new columns. The temp table schema is fixed at creation time.
+
+### Rule 6: Testing Override Queries
+
+After writing a `&Вместо` override:
+1. Check `get_project_errors` in EDT — look for "Поле не найдено" type errors
+2. Run the specific print form that uses the data (УПД, СФ, накладная)
+3. Test with documents that HAVE tracked items (ПрослеживаемыйТовар = Истина)
+4. Test with documents that DON'T have tracked items (to verify fallback)
+
 ## Source
 
 Extracted from UNF (1С:Управление Нашей Фирмой) BSP library modules:
