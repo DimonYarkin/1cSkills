@@ -139,29 +139,153 @@ description: >
 
 ## 8. Debugging HTTP Services
 
-| Symptom | Cause |
-|---------|-------|
-| 404 without auth | Endpoint not registered |
-| 401 without auth, 500 with auth | Module crashes during execution |
-| 500 on ALL endpoints | Extension has compilation error |
-| 200 but wrong data | Check JSON parsing (ЧтениеJSON vs ПрочитатьJSON) |
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| 404 without auth | Endpoint not registered | Check VRD + extension applied |
+| 401 without auth, 500 with auth | Module crashes | Check `1Cv8Log/` |
+| 500 on ALL endpoints | Extension compilation error | Check EDT `get_project_errors` |
+| 405 Method Not Allowed | Wrong HTTP method | Use POST for EXECUTEQUERY |
+| Timeout on query | Too complex, heavy joins | Split into simpler queries (Rule 1-2) |
+| 400 Bad Request | JSON encoding issue | Use `[System.Text.Encoding]::UTF8.GetBytes()` |
 
 **Check logs:**
-- Apache: `C:\Apache24\logs\error.log`
-- 1C infobase: `1Cv8Log/` directory
+- Apache: `C:\Apache24\logs\error.log` and `access.log`
+- 1C infobase: `E:\Байер\Новая база\1Cv8Log\`
 - EDT: `C:\Users\admin\AppData\Local\Temp\1cedt\`
 
-## 9. Testing with curl/PowerShell
+## 9. Testing with PowerShell
+
+**IMPORTANT:** PowerShell in non-interactive mode throws `Invoke-WebRequest` errors about Prompt. Use `System.Net.HttpWebRequest` instead:
 
 ```powershell
-# Ping test
-$cred = [System.Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes("user:pass"))
-Invoke-WebRequest -Uri "http://host/hs/test/ping/" -Headers @{Authorization="Basic $cred"}
+[System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
+$cred = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("obmen:203501"))
+$json = [System.Text.Encoding]::UTF8.GetBytes('{"Команда":"EXECUTEQUERY","ТекстЗапроса":"ВЫБРАТЬ 1 КАК Тест"}')
 
-# POST with JSON body
-$body = '{"Команда":"EXECUTEQUERY","ТекстЗапроса":"ВЫБРАТЬ 1 КАК Число"}'
-Invoke-WebRequest -Uri "http://host/hs/ai/api/" -Method POST `
-    -Body ([System.Text.Encoding]::UTF8.GetBytes($body)) `
-    -ContentType "application/json;charset=utf-8" `
-    -Headers @{Authorization="Basic $cred"}
+$req = [System.Net.HttpWebRequest]::Create("http://localhost/unf/ru/hs/ai/api")
+$req.Method = "POST"
+$req.ContentType = "application/json; charset=utf-8"
+$req.Timeout = 30000
+$req.ContentLength = $json.Length
+$req.Headers.Add("Authorization", "Basic $cred")
+$s = $req.GetRequestStream()
+$s.Write($json, 0, $json.Length)
+$s.Close()
+$resp = $req.GetResponse()
+$r = New-Object System.IO.StreamReader($resp.GetResponseStream())
+$result = $r.ReadToEnd()
+$r.Close()
+$resp.Close()
+$result
+```
+
+**Error handling pattern:**
+```powershell
+try { ... } catch {
+    $code = if ($_.Exception.Response) {
+        $e = $_.Exception.Response
+        $sr = New-Object System.IO.StreamReader($e.GetResponseStream())
+        $errBody = $sr.ReadToEnd(); $sr.Close()
+        "$([int]$e.StatusCode): $errBody"
+    } else { "timeout" }
+    "ERR ($code)"
+}
+```
+
+## 10. AI_Agent Service — Known Configuration
+
+**UNF deployment:**
+- URL: `http://localhost/unf/ru/hs/ai/api`
+- Method: POST
+- Content-Type: `application/json; charset=utf-8`
+- Auth: Basic `obmen:203501`
+- VRD: `C:\www\unf\default.vrd` with `publishExtensionsByDefault="true"`
+
+**Request format:**
+```json
+{"Команда":"EXECUTEQUERY","ТекстЗапроса":"ВЫБРАТЬ ..."}
+```
+
+**Response:** JSON array of objects, one per result row.
+
+## 11. Query Optimization Rules
+
+### Rule 1: Start Simple, Add Complexity
+```sql
+-- STEP 1: count first
+ВЫБРАТЬ КОЛИЧЕСТВО(*) ИЗ Документ.ЗаказПокупателя
+
+-- STEP 2: basic fields (no joins)
+ВЫБРАТЬ ПЕРВЫЕ 5 Ссылка, Дата, Номер ИЗ Документ.ЗаказПокупателя
+
+-- STEP 3: add joins one by one
+ВЫБРАТЬ Дата, Номер, Контрагент.Наименование КАК Контрагент ИЗ Документ.ЗаказПокупателя
+```
+
+### Rule 2: Avoid Heavy Joins in One Query
+```sql
+-- BAD — times out on large tables:
+ВЫБРАТЬ Дата, Номер, Контрагент.Наименование, СостояниеЗаказа.Наименование,
+        СуммаДокумента ИЗ Документ.ЗаказПокупателя
+
+-- GOOD — split into separate queries:
+-- Query 1: basic data
+ВЫБРАТЬ Дата, Номер, СуммаДокумента, СостояниеЗаказа.Наименование ИЗ Документ.ЗаказПокупателя
+-- Query 2: customer names
+ВЫБРАТЬ Номер, Контрагент.Наименование ИЗ Документ.ЗаказПокупателя
+```
+
+### Rule 3: Use ПЕРВЫЕ for Exploration
+```sql
+ВЫБРАТЬ ПЕРВЫЕ 10 Номенклатура.Наименование КАК Товар, Количество, Цена
+ИЗ Документ.РасходнаяНакладная.Запасы
+```
+
+### Rule 4: Boolean Filters
+```sql
+-- CORRECT:
+ГДЕ Проведен            -- Boolean field, no = needed
+ГДЕ НЕ Проведен
+
+-- WRONG:
+ГДЕ Проведен = ИСТИНА   -- Works but verbose
+```
+
+### Rule 5: Count Before Fetching
+```sql
+-- Always check count first to avoid timeouts:
+ВЫБРАТЬ КОЛИЧЕСТВО(*) КАК Колво ИЗ Документ.ЗаказПокупателя
+```
+
+### Rule 6: Common UNF Queries
+
+**Sales (Расходные накладные):**
+```sql
+ВЫБРАТЬ Дата, Номер, Контрагент.Наименование КАК Контрагент,
+        СуммаДокумента КАК Сумма
+ИЗ Документ.РасходнаяНакладная ГДЕ Проведен
+```
+
+**Sales line items:**
+```sql
+ВЫБРАТЬ Номенклатура.Наименование КАК Товар, Количество, Цена,
+        Сумма, СтавкаНДС, СуммаНДС, Всего
+ИЗ Документ.РасходнаяНакладная.Запасы ГДЕ Ссылка.Проведен
+```
+
+**Customer orders (Заказы покупателей):**
+```sql
+ВЫБРАТЬ Дата, Номер, СуммаДокумента КАК Сумма,
+        СостояниеЗаказа.Наименование КАК Состояние
+ИЗ Документ.ЗаказПокупателя
+```
+
+**Organizations:**
+```sql
+ВЫБРАТЬ Наименование ИЗ Справочник.Организации
+```
+
+**Counters:**
+```sql
+ВЫБРАТЬ КОЛИЧЕСТВО(*) КАК Колво ИЗ Документ.РасходнаяНакладная ГДЕ Проведен
 ```
