@@ -289,3 +289,213 @@ try { ... } catch {
 ```sql
 ВЫБРАТЬ КОЛИЧЕСТВО(*) КАК Колво ИЗ Документ.РасходнаяНакладная ГДЕ Проведен
 ```
+
+---
+
+## 12. Query Error Patterns and Fixes (Real Cases)
+
+### Error 1: 400 Bad Request — UTF-8 Encoding
+**Симптом:** `Invoke-RestMethod` возвращает 400 Bad Request при запросах с русскими символами.
+
+**Причина:** PowerShell кодирует строку в system encoding, а не UTF-8.
+
+**Исправление:**
+```powershell
+# НЕПРАВИЛЬНО:
+$body = '{"Команда":"EXECUTEQUERY","ТекстЗапроса":"ВЫБРАТЬ 1"}'
+Invoke-RestMethod -Body $body ...
+
+# ПРАВИЛЬНО:
+$bodyObj = @{ Команда = "EXECUTEQUERY"; ТекстЗапроса = $query }
+$json = $bodyObj | ConvertTo-Json -Depth 3
+$jsonBytes = [System.Text.Encoding]::UTF8.GetBytes($json)
+Invoke-RestMethod -Body $jsonBytes ...
+```
+
+**Правило:** ВСЕГДА кодировать JSON через `[System.Text.Encoding]::UTF8.GetBytes()` перед отправкой.
+
+---
+
+### Error 2: Query Timeout — Большие запросы
+**Симптом:** Запрос выполняется > 30 секунд, клиент отвечает таймаутом.
+
+**Причина:** Выборка всех документов без ограничений или сложные JOIN-ы.
+
+**Исправление:**
+```sql
+-- НЕПРАВИЛЬНО (таймаут):
+ВЫБРАТЬ * ИЗ Документ.РасходнаяНакладная
+
+-- ПРАВИЛЬНО:
+-- Вариант 1: Ограничение количества
+ВЫБРАТЬ ПЕРВЫЕ 100 Дата, Номер, СуммаДокумента
+ИЗ Документ.РасходнаяНакладная
+
+-- Вариант 2: Агрегатный запрос
+ВЫБРАТЬ КОЛИЧЕСТВО(*) КАК Колво,
+       СУММА(СуммаДокумента) КАК ОбщаяСумма
+ИЗ Документ.РасходнаяНакладная
+
+-- Вариант 3: Фильтр по дате
+ВЫБРАТЬ Дата, Номер, СуммаДокумента
+ИЗ Документ.РасходнаяНакладная
+ГДЕ Дата >= &НачалоПериода
+```
+
+**Правило:** Начинай с ПЕРВЫЕ N или агрегатов. Добавляй фильтры по мере необходимости.
+
+---
+
+### Error 3: Поле не найдено — Несуществующие реквизиты
+**Симптом:** `(9, 17): Поле не найдено "Организации.Комментарий"`
+
+**Причина:** Попытка обратиться к реквизиту, которого нет в справочнике/документе.
+
+**Исправление:** Проверять структуру объекта перед запросом.
+
+```sql
+-- Сначала получить список полей:
+ВЫБРАТЬ ПЕРВЫЕ 1 Ссылка ИЗ Справочник.Организации
+
+-- Затем запросить конкретные поля:
+ВЫБРАТЬ Наименование, ИНН, КПП ИЗ Справочник.Организации
+```
+
+**Правило:** Не используй реквизиты "наугад". Если нужен нестандартный реквизит — проверь через EDT `get_metadata_details`.
+
+---
+
+### Error 4: Синтаксическая ошибка — Кавычки в JSON
+**Симптом:** `Синтаксическая ошибка "БАЕР"` или `Ожидается выражение "ВЫБРАТЬ"`
+
+**Причина:** Кавычки в запросе конфликтуют с JSON-обёрткой.
+
+**Исправление:**
+```powershell
+# НЕПРАВИЛЬНО — кавычки ломают JSON:
+$query = "ГДЕ Организация.Наименование = ""БАЕР ПАК ООО"""
+
+# ПРАВИЛЬНО — здесь-строка PowerShell (открывающая/закрывающая кавычки):
+$query = @"
+ВЫБРАТЬ Номер, Дата
+ИЗ Документ.РасходнаяНакладная
+ГДЕ Организация.Наименование = "БАЕР ПАК ООО"
+"@
+
+# ИЛИ: через ConvertTo-Json (автоматическое экранирование):
+$bodyObj = @{ Команда = "EXECUTEQUERY"; ТекстЗапроса = $query }
+$json = $bodyObj | ConvertTo-Json -Depth 3
+```
+
+**Правило:** Используй here-strings `@"..."@` или `ConvertTo-Json` для автоматического экранирования.
+
+---
+
+### Error 5: Invoke-WebRequest — PowerShell non-interactive mode
+**Симптом:** `Invoke-WebRequest` выбрасывает ошибку о Prompt в неинтерактивном режиме.
+
+**Причина:** PowerShell ISE/CLI в неинтерактивном режиме не поддерживает `Invoke-WebRequest`.
+
+**Исправление:**
+```powershell
+# НЕПРАВИЛЬНО:
+Invoke-WebRequest -Uri "http://..." -Method Post -Body $body
+
+# ПРАВИЛЬНО — System.Net.HttpWebRequest:
+[System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
+$req = [System.Net.HttpWebRequest]::Create("http://localhost/unf/ru/hs/ai/api")
+$req.Method = "POST"
+$req.ContentType = "application/json; charset=utf-8"
+$req.Timeout = 30000
+$req.ContentLength = $jsonBytes.Length
+$req.Headers.Add("Authorization", "Basic $cred")
+$s = $req.GetRequestStream()
+$s.Write($jsonBytes, 0, $jsonBytes.Length)
+$s.Close()
+$resp = $req.GetResponse()
+$r = New-Object System.IO.StreamReader($resp.GetResponseStream())
+$result = $r.ReadToEnd()
+$r.Close(); $resp.Close()
+$result
+```
+
+**Правило:** В PowerShell-скриптах ВСЕГДА используй `System.Net.HttpWebRequest`.
+
+---
+
+### Error 6: Number format — Десятичный разделитель
+**Симптом:** Значения типа `33,33` (запятая вместо точки) ломают JSON.
+
+**Причина:** 1С возвращает числа с запятой, но JSON требует точку.
+
+**Исправление (на стороне 1С):**
+```1c
+// В обработчике JSON:
+Представление = Формат(Значение, "ЧРД=.; ЧРГ=''");
+```
+
+**Исправление (на стороне клиента):**
+```powershell
+# Замена запятой на точку в ответе:
+$result = $result -replace ',', '.'
+```
+
+**Правило:** Всегда проверяй формат чисел в ответе.
+
+---
+
+### Error 7: Пустой ответ — Некорректный JSON
+**Симптом:** Ответ сервера не является валидным JSON.
+
+**Причина:** Сервер вернул HTML-страницу ошибки или пустой ответ.
+
+**Исправление:**
+```powershell
+try {
+    $result = Invoke-RestMethod ...
+} catch {
+    if ($_.Exception.Response) {
+        $sr = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())
+        $errBody = $sr.ReadToEnd()
+        $sr.Close()
+        Write-Host "Server error: $errBody"
+    }
+}
+```
+
+---
+
+## 13. Quick Reference — Complete Working Pattern
+
+```powershell
+# === ШАБЛОН ДЛЯ ЗАПРОСОВ К UNF ===
+
+# 1. Авторизация
+$cred = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("obmen:203501"))
+$headers = @{ Authorization = "Basic $cred" }
+
+# 2. Запрос (здесь-строка для читаемости)
+$query = @"
+ВЫБРАТЬ
+    Документ.Номер КАК Номер,
+    Документ.Дата КАК Дата
+ИЗ
+    Документ.РасходнаяНакладная КАК Документ
+ГДЕ
+    Документ.Проведен = ИСТИНА
+УПОРЯДОЧИТЬ ПО
+    Документ.Дата УБЫВ
+"@
+
+# 3. Формирование JSON
+$bodyObj = @{ Команда = "EXECUTEQUERY"; ТекстЗапроса = $query }
+$json = $bodyObj | ConvertTo-Json -Depth 3
+$jsonBytes = [System.Text.Encoding]::UTF8.GetBytes($json)
+
+# 4. Отправка
+Invoke-RestMethod -Uri "http://localhost/unf/ru/hs/ai/api" `
+    -Method Post `
+    -ContentType "application/json; charset=utf-8" `
+    -Body $jsonBytes `
+    -Headers $headers
+```
